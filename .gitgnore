@@ -1,13 +1,16 @@
 # Directories
-/csv
-/data
-/models
-/notebooks/.ipynb_checkpoints
+/csv/
+/data/
 
-# Files
-/csv.zip
+# Specific large files
 prepared_data.csv
+prepared_data.csv.zip
+csv.zip
+
+# Large CSV files
 *.csv
+
+# Other data files
 *.pkl
 *.h5
 

@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import GridSearchCV, train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold, cross_val_score, GridSearchCV
 from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import IsolationForest, VotingClassifier, BaggingClassifier
 from sklearn.covariance import EllipticEnvelope
@@ -8,6 +8,7 @@ from sklearn.svm import OneClassSVM
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, make_scorer
 from sklearn.feature_selection import SelectFromModel
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
 from imblearn.combine import SMOTEENN, SMOTETomek
 from imblearn.over_sampling import ADASYN
 from imblearn.under_sampling import TomekLinks
@@ -54,22 +55,20 @@ data = pd.read_csv('csv/cleaned_data.csv', parse_dates=['measure_date'])
 sample_size = min(1000000, len(data))
 data_sampled = data.sample(n=sample_size, random_state=42)
 
+# Sort data by date
+data_sampled = data_sampled.sort_values('measure_date')
+
 threshold = data_sampled['value'].quantile(0.75)
 data_sampled['target'] = (data_sampled['value'] > threshold).astype(int)
 
 print("Target variable distribution:")
 print(data_sampled['target'].value_counts(normalize=True))
 
-# Enhanced Feature engineering
+# Enhanced Feature engineering (without lag and rolling statistics)
 data_sampled['hour'] = data_sampled['measure_date'].dt.hour
 data_sampled['day_of_week'] = data_sampled['measure_date'].dt.dayofweek
 data_sampled['month'] = data_sampled['measure_date'].dt.month
 data_sampled['is_weekend'] = data_sampled['day_of_week'].isin([5, 6]).astype(int)
-data_sampled['value_lag_1'] = data_sampled.groupby('event_variable')['value'].shift(1)
-data_sampled['value_rolling_mean'] = data_sampled.groupby('event_variable')['value'].rolling(window=24, min_periods=1).mean().reset_index(0, drop=True)
-data_sampled['value_rolling_std'] = data_sampled.groupby('event_variable')['value'].rolling(window=24, min_periods=1).std().reset_index(0, drop=True)
-data_sampled['value_diff'] = data_sampled.groupby('event_variable')['value'].diff()
-data_sampled['value_pct_change'] = data_sampled.groupby('event_variable')['value'].pct_change()
 
 # More complex features
 data_sampled['hour_sin'] = np.sin(2 * np.pi * data_sampled['hour'] / 24)
@@ -80,19 +79,33 @@ data_sampled['month_sin'] = np.sin(2 * np.pi * data_sampled['month'] / 12)
 data_sampled['month_cos'] = np.cos(2 * np.pi * data_sampled['month'] / 12)
 
 feature_columns = ['event_reference_value', 'hour', 'day_of_week', 'month', 'is_weekend', 
-                   'value_lag_1', 'value_rolling_mean', 'value_rolling_std', 'value_diff', 
-                   'value_pct_change', 'hour_sin', 'hour_cos', 'day_of_week_sin', 
+                   'hour_sin', 'hour_cos', 'day_of_week_sin', 
                    'day_of_week_cos', 'month_sin', 'month_cos']
 
-X = data_sampled[feature_columns].dropna()
-y = data_sampled['target'].loc[X.index]
+X = data_sampled[feature_columns]
+y = data_sampled['target']
 
 # Replace inf and nan values
 X = replace_inf_nan(X)
 y = y.loc[X.index]
 
-# Split the data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+# Verifica del processo di creazione delle feature
+print("Feature correlation with target:")
+correlation = X.corrwith(y)
+print(correlation.sort_values(ascending=False))
+
+# Verifica se ci sono feature con correlazione troppo alta con il target
+high_corr_features = correlation[abs(correlation) > 0.9].index
+if len(high_corr_features) > 0:
+    print(f"Warning: The following features have very high correlation with the target: {high_corr_features}")
+
+# Split the data (using time-based split)
+split_index = int(len(data_sampled) * 0.8)
+X_train, X_test = X[:split_index], X[split_index:]
+y_train, y_test = y[:split_index], y[split_index:]
+
+print("Train set date range:", data_sampled['measure_date'].iloc[:split_index].min(), "to", data_sampled['measure_date'].iloc[:split_index].max())
+print("Test set date range:", data_sampled['measure_date'].iloc[split_index:].min(), "to", data_sampled['measure_date'].iloc[split_index:].max())
 
 # Scale the features
 scaler = RobustScaler()
@@ -226,6 +239,13 @@ ensemble_grid_search = GridSearchCV(ensemble, param_grid, cv=StratifiedKFold(n_s
 ensemble_grid_search.fit(X_resampled_smoteenn, y_resampled_smoteenn)
 best_ensemble = ensemble_grid_search.best_estimator_
 
+# Cross-validation
+# Cross-validation
+print("Performing cross-validation...")
+cv_scores = cross_val_score(best_ensemble, X_resampled_smoteenn, y_resampled_smoteenn, cv=5, scoring=safe_roc_auc_scorer)
+print(f"Cross-validation scores: {cv_scores}")
+print(f"Mean CV score: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+
 # Evaluate ensemble
 X_test_xgb = xgb_selector.transform(X_test_scaled)
 X_test_lgb = lgb_selector.transform(X_test_scaled)
@@ -268,4 +288,108 @@ plt.tight_layout()
 plt.savefig('plots_ensemble_1000000_optimized/feature_importance_ensemble.png')
 plt.close()
 
+print("\nTop 5 important features:")
+print(ensemble_importance.head())
+
+# Verifica se c'è una feature dominante
+if ensemble_importance.iloc[0]['avg_importance'] > 0.5:
+    print(f"Warning: The feature '{ensemble_importance.iloc[0]['feature']}' has a very high importance. This might indicate data leakage.")
+
+# Verifica del codice di valutazione
+print("\nVerifying evaluation process...")
+# Assicuriamoci che stiamo usando il set di test corretto
+assert not np.array_equal(X_test, X_train), "Error: Test set is identical to training set"
+
+# Verifichiamo che la distribuzione delle classi nel set di test sia simile a quella originale
+original_distribution = data_sampled['target'].value_counts(normalize=True)
+test_distribution = y_test.value_counts(normalize=True)
+print("Original class distribution:")
+print(original_distribution)
+print("Test set class distribution:")
+print(test_distribution)
+
+# Verifichiamo che non ci siano feature con valori identici tra train e test
+for col in X_test.columns:
+    if np.array_equal(X_test[col], X_train[col]):
+        print(f"Warning: Feature '{col}' has identical values in train and test sets")
+
 print("\nEnsemble modeling completed. Visualizations saved in 'plots_ensemble_1000000_optimized' folder.")
+
+# Semplificazione del modello
+print("\nTraining a simple logistic regression model...")
+lr_model = LogisticRegression(random_state=42)
+lr_model.fit(X_train_scaled, y_train)
+
+lr_y_pred = lr_model.predict(X_test_scaled)
+lr_y_pred_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
+
+print("\nClassification Report for Logistic Regression:")
+print(classification_report(y_test, lr_y_pred))
+
+print("\nAUC-ROC Score for Logistic Regression:")
+print(roc_auc_score(y_test, lr_y_pred_proba))
+
+# Feature selection più aggressiva
+print("\nPerforming aggressive feature selection...")
+for i in range(5):  # Rimuovi le 5 feature più importanti una alla volta
+    most_important_feature = ensemble_importance.iloc[0]['feature']
+    print(f"Removing feature: {most_important_feature}")
+    
+    feature_columns = [f for f in feature_columns if f != most_important_feature]
+    X = data_sampled[feature_columns]
+    
+    # Ripeti il processo di training e valutazione con le feature rimanenti
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    scaler = RobustScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    lr_model = LogisticRegression(random_state=42)
+    lr_model.fit(X_train_scaled, y_train)
+    
+    lr_y_pred = lr_model.predict(X_test_scaled)
+    lr_y_pred_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
+    
+    print(f"\nClassification Report after removing {most_important_feature}:")
+    print(classification_report(y_test, lr_y_pred))
+    
+    print(f"\nAUC-ROC Score after removing {most_important_feature}:")
+    print(roc_auc_score(y_test, lr_y_pred_proba))
+    
+    # Aggiorna l'importanza delle feature
+    ensemble_importance = ensemble_importance[ensemble_importance['feature'] != most_important_feature]
+
+# Aumento della difficoltà del problema
+print("\nTrying different target definitions...")
+for percentile in [80, 85, 90, 95]:
+    threshold = data_sampled['value'].quantile(percentile / 100)
+    data_sampled['target'] = (data_sampled['value'] > threshold).astype(int)
+    
+    print(f"\nTarget definition: top {100 - percentile}%")
+    print("New target variable distribution:")
+    print(data_sampled['target'].value_counts(normalize=True))
+    
+    # Ripeti il processo di training e valutazione con questa nuova definizione del target
+    X = data_sampled[feature_columns]
+    y = data_sampled['target']
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    scaler = RobustScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    lr_model = LogisticRegression(random_state=42)
+    lr_model.fit(X_train_scaled, y_train)
+    
+    lr_y_pred = lr_model.predict(X_test_scaled)
+    lr_y_pred_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
+    
+    print(f"\nClassification Report for target definition {100 - percentile}%:")
+    print(classification_report(y_test, lr_y_pred))
+    
+    print(f"\nAUC-ROC Score for target definition {100 - percentile}%:")
+    print(roc_auc_score(y_test, lr_y_pred_proba))
+
+print("\nAnalysis completed.")

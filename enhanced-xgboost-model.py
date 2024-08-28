@@ -18,6 +18,9 @@ import shap
 import gc
 import time
 import logging
+import re
+from multiprocessing import cpu_count
+import psutil
 
 # Configurazione del logging
 logging.basicConfig(filename='model_log.txt', level=logging.INFO, 
@@ -35,10 +38,26 @@ if not os.path.exists('plots_xgboost_enhanced'):
     os.makedirs('plots_xgboost_enhanced')
     print("'plots_xgboost_enhanced' folder created.")
 
+def sanitize_input(data):
+    """Sanitizza l'input rimuovendo caratteri potenzialmente pericolosi."""
+    if isinstance(data, str):
+        return re.sub(r'[^\w\s-]', '', data)
+    return data
+
 def validate_input(X, feature_columns):
     """Valida l'input e rimuove valori anomali."""
     if not all(col in X.columns for col in feature_columns):
         raise ValueError("Input mancante di alcune feature attese")
+    
+    # Controllo dei tipi di dati
+    for col in feature_columns:
+        if X[col].dtype not in ['int64', 'float64']:
+            raise ValueError(f"Tipo di dati non valido per la colonna {col}")
+    
+    # Limiti sui valori
+    for col in feature_columns:
+        if X[col].min() < -1e6 or X[col].max() > 1e6:
+            raise ValueError(f"Valori fuori range nella colonna {col}")
     
     X = X.replace([np.inf, -np.inf], np.nan).dropna()
     
@@ -48,7 +67,7 @@ def validate_input(X, feature_columns):
     return X[is_inlier]
 
 def apply_data_quality_filters(df, feature_columns):
-    """Applica filtri per assicurare la qualità dei dati."""
+    """Applica filtri avanzati per assicurare la qualità dei dati."""
     df = df.drop_duplicates()
     
     for col in feature_columns:
@@ -60,6 +79,22 @@ def apply_data_quality_filters(df, feature_columns):
             upper_bound = Q3 + 1.5 * IQR
             df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
     
+    # Controllo della varianza
+    low_variance_cols = []
+    for col in feature_columns:
+        if df[col].var() < 0.1:  # Soglia arbitraria, da adattare al tuo caso
+            low_variance_cols.append(col)
+    if low_variance_cols:
+        print(f"Attenzione: le seguenti colonne hanno bassa varianza: {low_variance_cols}")
+    
+    # Controllo delle correlazioni
+    corr_matrix = df[feature_columns].corr().abs()
+    upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    high_corr_cols = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
+    if high_corr_cols:
+        print(f"Attenzione: le seguenti colonne sono altamente correlate: {high_corr_cols}")
+    
+    # Controlli specifici per colonne temporali
     if 'hour' in df.columns:
         df = df[df['hour'].between(0, 23)]
     if 'day_of_week' in df.columns:
@@ -69,25 +104,21 @@ def apply_data_quality_filters(df, feature_columns):
     
     return df
 
+def check_memory_usage():
+    memory_usage = psutil.virtual_memory().percent
+    if memory_usage > 90:
+        print("Attenzione: uso della memoria elevato. Considerare l'ottimizzazione.")
+        # Qui potresti implementare azioni come la pulizia della cache o la riduzione del batch size
+
 def incremental_train(model, X_new, y_new, num_boost_round=100):
     """Addestra incrementalmente il modello XGBoost con nuovi dati."""
-    # Crea un DMatrix con i nuovi dati
     dtrain = xgb.DMatrix(X_new, label=y_new)
-    
-    # Ottieni i parametri correnti del modello
     params = model.get_xgb_params()
-    
-    # Aggiorna i parametri per l'addestramento incrementale
     params['process_type'] = 'update'
     params['updater'] = 'refresh,prune'  
-    
-    # Addestra il modello con i nuovi dati, mantenendo il booster esistente
     model.get_booster().update(dtrain, iteration=num_boost_round)
-    
     return model
 
-
-# Load cleaned data and preprocess
 @memory.cache
 def load_and_preprocess_data():
     print("Loading cleaned data...")
@@ -120,18 +151,27 @@ def load_and_preprocess_data():
     data_sampled = apply_data_quality_filters(data_sampled, feature_columns)
     
     X = data_sampled[feature_columns].dropna()
-    
-    # Qui, allineiamo `y` a `X`
     y = data_sampled['target'].loc[X.index]
     
-    # Valida l'input
+    # Sanitizza e valida l'input
+    X = sanitize_input(X)
     X = validate_input(X, feature_columns)
-    
-    # Ancora una volta, allineiamo `y` a `X` dopo la validazione
     y = y.loc[X.index]
     
     return X, y, feature_columns
 
+def find_optimal_threshold(y_true, y_pred_proba, metric='f1'):
+    thresholds = np.arange(0.1, 1.0, 0.01)
+    scores = []
+    for threshold in thresholds:
+        y_pred = (y_pred_proba >= threshold).astype(int)
+        if metric == 'f1':
+            score = f1_score(y_true, y_pred)
+        elif metric == 'recall':
+            score = recall_score(y_true, y_pred)
+        scores.append(score)
+    optimal_threshold = thresholds[np.argmax(scores)]
+    return optimal_threshold
 
 print("Starting data loading and preprocessing...")
 X, y, feature_columns = load_and_preprocess_data()
@@ -167,13 +207,11 @@ print(f"Removed {sum(outlier_mask)} outliers from training data.")
 # Advanced resampling techniques
 print("Applying advanced resampling techniques...")
 
-
 resampling_techniques = [
     ("SMOTEENN", SMOTEENN(random_state=42, n_jobs=-1)),
     ("SMOTETomek", SMOTETomek(random_state=42, n_jobs=-1)),
     ("ADASYN", ADASYN(random_state=42, n_jobs=-1, n_neighbors=NearestNeighbors(n_neighbors=5, n_jobs=-1)))
 ]
-
 
 resampled_data = {}
 
@@ -187,42 +225,32 @@ for name, technique in resampling_techniques:
 
 # Hyperparameter optimization with RandomizedSearchCV
 xgb_param_distributions = {
-    'n_estimators': [100, 200, 300, 400, 500],
-    'max_depth': [3, 5, 7, 9],
-    'learning_rate': [0.01, 0.05, 0.1, 0.2],
-    'subsample': [0.6, 0.8, 1.0],
-    'colsample_bytree': [0.6, 0.8, 1.0],
-    'min_child_weight': [1, 3, 5],
-    'scale_pos_weight': [1, 3, 5],
-    'gamma': [0, 0.1, 0.2],
-    'reg_alpha': [0, 0.1, 1],
-    'reg_lambda': [0, 0.1, 1]
+    'n_estimators': [100, 200, 300],
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.05, 0.1],
+    'subsample': [0.6, 0.8],
+    'colsample_bytree': [0.6, 0.8],
+    'min_child_weight': [1, 3],
+    'scale_pos_weight': [1, 3],
+    'gamma': [0, 0.1],
+    'reg_alpha': [0, 0.1],
+    'reg_lambda': [0, 0.1]
 }
 
-def find_optimal_threshold(y_true, y_pred_proba, metric='f1'):
-    thresholds = np.arange(0.1, 1.0, 0.01)
-    scores = []
-    for threshold in thresholds:
-        y_pred = (y_pred_proba >= threshold).astype(int)
-        if metric == 'f1':
-            score = f1_score(y_true, y_pred)
-        elif metric == 'recall':
-            score = recall_score(y_true, y_pred)
-        scores.append(score)
-    optimal_threshold = thresholds[np.argmax(scores)]
-    return optimal_threshold
+# Usa solo una parte delle CPU disponibili
+n_jobs = max(1, cpu_count() // 2)
 
 # Train and evaluate XGBoost for all resampling techniques
 for name, (X_resampled, y_resampled) in resampled_data.items():
     print(f"\nTraining XGBoost with {name}...")
     start_time = time.time()
     
-    xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=-1)
+    xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=n_jobs)
     
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
     random_search = RandomizedSearchCV(estimator=xgb_model, param_distributions=xgb_param_distributions, 
-                                       n_iter=40, cv=cv, n_jobs=-1, scoring='f1_macro', random_state=42, verbose=2)
+                                       n_iter=20, cv=cv, n_jobs=n_jobs, scoring='f1_macro', random_state=42, verbose=2)
     random_search.fit(X_resampled, y_resampled)
 
     print(f"Best parameters for XGBoost with {name}:", random_search.best_params_)
@@ -268,6 +296,8 @@ for name, (X_resampled, y_resampled) in resampled_data.items():
     sns.barplot(x='importance', y='feature', data=feature_importance)
     plt.title(f'Feature Importance - XGBoost with {name}')
     plt.tight_layout()
+    plt.title(f'Feature Importance - XGBoost with {name}')
+    plt.tight_layout()
     plt.savefig(f'plots_xgboost_enhanced/feature_importance_XGBoost_{name}.png')
     plt.close()
 
@@ -304,6 +334,9 @@ for name, (X_resampled, y_resampled) in resampled_data.items():
     
     end_time = time.time()
     print(f"Total time for {name}: {end_time - start_time:.2f} seconds")
+
+    # Controlla l'uso della memoria
+    check_memory_usage()
 
     gc.collect()  # Force garbage collection
 

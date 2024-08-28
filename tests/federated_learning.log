@@ -18,3 +18,17 @@
 2024-08-27 10:39:54,985 - INFO - Global model aggregation completed
 2024-08-27 10:39:55,096 - INFO - Starting local model training
 2024-08-27 10:39:55,113 - INFO - Local model training completed for client 0
+2024-08-28 09:26:28,662 - INFO - Starting global model aggregation using FedAvg
+2024-08-28 09:26:28,663 - INFO - Global model aggregation completed using FedAvg
+2024-08-28 09:26:28,802 - INFO - Starting local model training
+2024-08-28 09:26:28,818 - INFO - Local model training completed for client 0
+2024-08-28 09:26:28,916 - INFO - Starting Federated Learning round 1/2
+2024-08-28 09:34:26,491 - INFO - Starting global model aggregation using FedAvg
+2024-08-28 09:34:26,491 - INFO - Global model aggregation completed using FedAvg
+2024-08-28 09:34:26,526 - INFO - Starting local model training
+2024-08-28 09:34:26,538 - INFO - Local model training completed for client 0
+2024-08-28 09:34:26,635 - INFO - Starting Federated Learning round 1/2
+2024-08-28 09:36:05,716 - INFO - Starting local model training
+2024-08-28 09:36:05,730 - INFO - Local model training completed for client 0
+2024-08-28 09:54:26,666 - INFO - Starting local model training
+2024-08-28 09:54:26,677 - INFO - Local model training completed for client 0

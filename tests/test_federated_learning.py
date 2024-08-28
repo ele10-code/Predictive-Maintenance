@@ -20,9 +20,9 @@ from xgboost_model_federated_learning import (
     apply_data_quality_filters,
     create_base_model,
     train_local_model,
-    aggregate_models,
+    federated_averaging,  
     find_optimal_threshold,
-    incremental_train,
+    federated_averaging,
     simulate_client_data,
     upload_to_s3,
     download_from_s3,
@@ -30,7 +30,12 @@ from xgboost_model_federated_learning import (
     local_training_handler,
     global_aggregation_handler,
     S3_BUCKET,
-    S3_CLIENT
+    S3_CLIENT,
+    parse_tree,
+    average_weights,
+    update_tree,
+    federated_learning_round,
+    run_federated_learning
 )
 
 class TestFederatedLearning(unittest.TestCase):
@@ -95,14 +100,6 @@ class TestFederatedLearning(unittest.TestCase):
         self.assertIsInstance(local_model, xgb.XGBClassifier)
         print(f"Local model trained: {local_model}")
 
-    def test_aggregate_models(self):
-        models = [create_base_model() for _ in range(3)]
-        for model in models:
-            model.fit(self.X, self.y)
-        aggregated_model = aggregate_models(models)
-        self.assertIsInstance(aggregated_model, xgb.XGBClassifier)
-        print(f"Aggregated model: {aggregated_model}")
-
     def test_find_optimal_threshold(self):
         y_true = np.random.randint(0, 2, 100)
         y_pred_proba = np.random.rand(100)
@@ -111,12 +108,6 @@ class TestFederatedLearning(unittest.TestCase):
         self.assertLess(threshold, 1)
         print(f"Optimal threshold: {threshold}")
 
-    def test_incremental_train(self):
-        model = create_base_model()
-        model.fit(self.X[:800], self.y[:800])
-        updated_model = incremental_train(model, self.X[800:], self.y[800:])
-        self.assertIsInstance(updated_model, xgb.XGBClassifier)
-        print(f"Incrementally trained model: {updated_model}")
 
     def test_simulate_client_data(self):
         X_client, y_client = simulate_client_data(self.X, self.y)
@@ -183,22 +174,106 @@ class TestFederatedLearning(unittest.TestCase):
         self.assertEqual(result['statusCode'], 200)
         print(f"Local training handler result: {result}")
 
+def test_global_aggregation_handler(self):
+    """
+    Testa l'aggregazione dei modelli locali in un modello globale utilizzando FedAvg 
+    e il caricamento del modello risultante su S3.
+    """
+    # Mock delle funzioni necessarie
+    with unittest.mock.patch('xgboost_model_federated_learning.download_from_s3') as mock_download, \
+         unittest.mock.patch('xgboost_model_federated_learning.upload_to_s3') as mock_upload, \
+         unittest.mock.patch('xgboost_model_federated_learning.load') as mock_load, \
+         unittest.mock.patch('xgboost_model_federated_learning.dump') as mock_dump, \
+         unittest.mock.patch('xgboost_model_federated_learning.federated_averaging') as mock_fedavg:
+        
+        # Configurazione dei mock
+        mock_download.return_value = True
+        mock_upload.return_value = True
+        mock_load.return_value = create_base_model()
+        mock_fedavg.return_value = create_base_model()
+        mock_dump.return_value = None
+
+        # Esecuzione del global_aggregation_handler
+        event = {'client_ids': [0, 1, 2]}
+        result = global_aggregation_handler(event, None)
+
+        # Verifiche
+        self.assertEqual(result['statusCode'], 200)
+        mock_download.assert_called()
+        mock_fedavg.assert_called_once()
+        mock_upload.assert_called()
+        mock_dump.assert_called()
+
+        print(f"Global aggregation handler result: {result}")
+    
+    def test_federated_averaging(self):
+        models = [create_base_model() for _ in range(3)]
+        for model in models:
+            model.fit(self.X, self.y)
+        averaged_model = federated_averaging(models)
+        self.assertIsInstance(averaged_model, xgb.XGBClassifier)
+        print(f"Federated averaged model: {averaged_model}")
+
+    def test_parse_tree(self):
+        model = create_base_model()
+        model.fit(self.X, self.y)
+        tree = model.get_booster().get_dump()[0]
+        weights = parse_tree(tree)
+        self.assertIsInstance(weights, dict)
+        self.assertGreater(len(weights), 0)
+        print(f"Parsed tree weights: {weights}")
+
+    def test_average_weights(self):
+        weights_list = [{'0': 1.0, '1': 2.0}, {'0': 2.0, '1': 3.0}, {'0': 3.0, '1': 4.0}]
+        avg_weights = average_weights(weights_list)
+        self.assertEqual(avg_weights, {'0': 2.0, '1': 3.0})
+        print(f"Averaged weights: {avg_weights}")
+
+    @unittest.mock.patch('xgboost_model_federated_learning.xgb.Booster')
+    def test_update_tree(self, mock_booster):
+        mock_booster.get_dump.return_value = ['0:[f0<0.5] yes=1,no=2,missing=1\n\t1:leaf=1.5\n\t2:leaf=2.5\n']
+        mock_booster.num_features.return_value = 20
+        new_weights = {'1': 1.0, '2': 2.0}
+        update_tree(mock_booster, 0, new_weights)
+        mock_booster.set_param.assert_called_once_with({'updater': 'refresh'})
+        mock_booster.update.assert_called_once()
+        mock_booster.load_model.assert_called_once()
+        print("Tree update test passed")
+
+    def test_federated_learning_round(self):
+        global_model = create_base_model()
+        clients = [
+            {'X': simulate_client_data(self.X, self.y)[0], 'y': simulate_client_data(self.X, self.y)[1]}
+            for _ in range(3)
+        ]
+        new_global_model = federated_learning_round(clients, global_model)
+        self.assertIsInstance(new_global_model, xgb.XGBClassifier)
+        print(f"New global model after one round: {new_global_model}")
+
+    @unittest.mock.patch('xgboost_model_federated_learning.load_and_preprocess_data')
+    def test_run_federated_learning(self, mock_load_data):
+        mock_load_data.return_value = (self.X, self.y, self.feature_columns)
+        final_model = run_federated_learning(num_rounds=2, num_clients=3)
+        self.assertIsInstance(final_model, xgb.XGBClassifier)
+        print(f"Final federated learning model: {final_model}")
+
     @unittest.mock.patch('xgboost_model_federated_learning.download_from_s3')
     @unittest.mock.patch('xgboost_model_federated_learning.upload_to_s3')
     @unittest.mock.patch('xgboost_model_federated_learning.load')
     @unittest.mock.patch('xgboost_model_federated_learning.dump')
-    @unittest.mock.patch('xgboost_model_federated_learning.aggregate_models')
-    def test_global_aggregation_handler(self, mock_aggregate, mock_dump, mock_load, mock_upload, mock_download):
+    @unittest.mock.patch('xgboost_model_federated_learning.federated_averaging')
+    def test_global_aggregation_handler_fedavg(self, mock_fedavg, mock_dump, mock_load, mock_upload, mock_download):
         mock_download.return_value = True
         mock_upload.return_value = True
         mock_load.return_value = create_base_model()
-        mock_aggregate.return_value = create_base_model()
+        mock_fedavg.return_value = create_base_model()
         mock_dump.return_value = None
 
         event = {'client_ids': [0, 1, 2]}
         result = global_aggregation_handler(event, None)
         self.assertEqual(result['statusCode'], 200)
-        print(f"Global aggregation handler result: {result}")
+        mock_fedavg.assert_called_once()
+        print(f"Global aggregation handler (FedAvg) result: {result}")
 
 if __name__ == "__main__":
     suite = unittest.TestLoader().loadTestsFromTestCase(TestFederatedLearning)

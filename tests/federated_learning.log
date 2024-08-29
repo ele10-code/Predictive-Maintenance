@@ -1,0 +1,34 @@
+2024-08-27 10:27:04,165 - INFO - Starting global model aggregation
+2024-08-27 10:27:04,187 - INFO - Global model aggregation completed
+2024-08-27 10:27:04,269 - INFO - Starting local model training
+2024-08-27 10:27:04,270 - ERROR - Error in local_training_handler: Unable to locate credentials
+2024-08-27 10:27:04,302 - INFO - Starting local model training
+2024-08-27 10:27:04,317 - ERROR - Error in local_training_handler: module 'diffprivlib.models' has no attribute 'XGBClassifier'
+2024-08-27 10:30:56,871 - INFO - Starting global model aggregation
+2024-08-27 10:30:56,872 - INFO - Global model aggregation completed
+2024-08-27 10:34:04,783 - INFO - Starting global model aggregation
+2024-08-27 10:34:04,784 - INFO - Global model aggregation completed
+2024-08-27 10:34:04,901 - INFO - Starting local model training
+2024-08-27 10:34:04,918 - ERROR - Error in local_training_handler: module 'diffprivlib.models' has no attribute 'XGBClassifier'
+2024-08-27 10:36:41,318 - INFO - Starting global model aggregation
+2024-08-27 10:36:41,319 - INFO - Global model aggregation completed
+2024-08-27 10:36:41,530 - INFO - Starting local model training
+2024-08-27 10:36:41,549 - INFO - Local model training completed for client 0
+2024-08-27 10:39:54,983 - INFO - Starting global model aggregation
+2024-08-27 10:39:54,985 - INFO - Global model aggregation completed
+2024-08-27 10:39:55,096 - INFO - Starting local model training
+2024-08-27 10:39:55,113 - INFO - Local model training completed for client 0
+2024-08-28 09:26:28,662 - INFO - Starting global model aggregation using FedAvg
+2024-08-28 09:26:28,663 - INFO - Global model aggregation completed using FedAvg
+2024-08-28 09:26:28,802 - INFO - Starting local model training
+2024-08-28 09:26:28,818 - INFO - Local model training completed for client 0
+2024-08-28 09:26:28,916 - INFO - Starting Federated Learning round 1/2
+2024-08-28 09:34:26,491 - INFO - Starting global model aggregation using FedAvg
+2024-08-28 09:34:26,491 - INFO - Global model aggregation completed using FedAvg
+2024-08-28 09:34:26,526 - INFO - Starting local model training
+2024-08-28 09:34:26,538 - INFO - Local model training completed for client 0
+2024-08-28 09:34:26,635 - INFO - Starting Federated Learning round 1/2
+2024-08-28 09:36:05,716 - INFO - Starting local model training
+2024-08-28 09:36:05,730 - INFO - Local model training completed for client 0
+2024-08-28 09:54:26,666 - INFO - Starting local model training
+2024-08-28 09:54:26,677 - INFO - Local model training completed for client 0

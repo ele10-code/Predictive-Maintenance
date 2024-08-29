@@ -94,7 +94,7 @@ for device_id in device_ids:
         X_test_scaled = scaler.transform(X_test)
 
         # XGBoost model and hyperparameter search
-        xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=-1)
+        xgb_model = xgb.XGBClassifier(random_state=42)
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
         random_search = RandomizedSearchCV(estimator=xgb_model, param_distributions=xgb_param_distributions, 
@@ -163,4 +163,4 @@ for device_id in device_ids:
     plt.savefig(f'plots_xgboost_optimized_fault/performance_chart_device_{device_id}.png')
     plt.close()
 
-print("Analysis complete. Check the 'plots_xgboost_optimized' folder for performance charts.")
+print("Analysis complete. Check the 'plots_xgboost_optimized_fault' folder for performance charts.")

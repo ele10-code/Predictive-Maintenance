@@ -1,20 +1,15 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import IsolationForest
-from sklearn.svm import OneClassSVM
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score, recall_score
-from imblearn.combine import SMOTEENN, SMOTETomek
-from imblearn.over_sampling import ADASYN
-from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 import warnings
 from joblib import Memory, dump, load
-import shap
 import gc
 import time
 import logging
@@ -25,18 +20,16 @@ import json
 from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
-from io import BytesIO
 import hashlib
 from cryptography.fernet import Fernet
-import unittest
-import diffprivlib.models as dp
+import io
 
-# Configurazione del logging avanzata
+# Configurazione del logging
 logging.basicConfig(filename='federated_learning.log', level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-# Suppress specific warnings
+# Suppress warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -124,13 +117,6 @@ def apply_data_quality_filters(df, feature_columns):
     if high_corr_cols:
         logger.warning(f"Colonne altamente correlate: {high_corr_cols}")
 
-    if 'hour' in df.columns:
-        df = df[df['hour'].between(0, 23)]
-    if 'day_of_week' in df.columns:
-        df = df[df['day_of_week'].between(0, 6)]
-    if 'month' in df.columns:
-        df = df[df['month'].between(1, 12)]
-
     return df
 
 def check_memory_usage():
@@ -138,15 +124,6 @@ def check_memory_usage():
     if memory_usage > 90:
         logger.warning("Uso della memoria elevato. Considerare l'ottimizzazione.")
         gc.collect()
-
-def incremental_train(model, X_new, y_new, num_boost_round=100):
-    """Addestra incrementalmente il modello XGBoost con nuovi dati."""
-    dtrain = xgb.DMatrix(X_new, label=y_new)
-    params = model.get_xgb_params()
-    params['process_type'] = 'update'
-    params['updater'] = 'refresh,prune'  
-    model.get_booster().update(dtrain, iteration=num_boost_round)
-    return model
 
 @memory.cache
 def load_and_preprocess_data():
@@ -206,16 +183,98 @@ def train_local_model(X, y, base_model):
     model = base_model.fit(X, y)
     return model
 
-def aggregate_models(models):
-    """Aggrega i modelli locali in un modello globale."""
-    global_model = create_base_model()
-    for param in global_model.get_params():
-        if param in models[0].get_params():
-            param_values = [model.get_params()[param] for model in models]
-            if all(isinstance(val, (int, float)) for val in param_values):
-                avg_param = np.mean(param_values)
-                global_model.set_params(**{param: avg_param})
+import numpy as np
+import xgboost as xgb
+from typing import List, Dict, Any
+import io
+
+def federated_averaging(models: List[xgb.XGBClassifier]) -> xgb.XGBClassifier:
+    """
+    Implementa l'algoritmo FedAvg per i modelli XGBoost.
+    
+    Args:
+    models (List[xgb.XGBClassifier]): Lista di modelli XGBoost locali.
+    
+    Returns:
+    xgb.XGBClassifier: Modello globale aggregato.
+    """
+    global_model = xgb.XGBClassifier()
+    global_model.fit(np.zeros((1, models[0].n_features_in_)), [0])  # Fit fittizio per inizializzare il modello
+
+    booster_list = [model.get_booster() for model in models]
+
+    for i in range(len(booster_list[0].get_dump())):
+        tree_weights = []
+        for booster in booster_list:
+            tree = booster.get_dump()[i]
+            tree_weights.append(parse_tree(tree))
+        
+        avg_weights = average_weights(tree_weights)
+        update_tree(global_model.get_booster(), i, avg_weights)
+
     return global_model
+
+def parse_tree(tree: str) -> Dict[str, float]:
+    """
+    Analizza un albero di decisione XGBoost e estrae i pesi.
+    
+    Args:
+    tree (str): Rappresentazione testuale dell'albero.
+    
+    Returns:
+    Dict[str, float]: Dizionario dei pesi dell'albero.
+    """
+    weights = {}
+    for line in tree.split('\n'):
+        if 'leaf' in line:
+            parts = line.split()
+            leaf_id = parts[0]
+            weight = float(parts[-1].split('=')[-1])
+            weights[leaf_id] = weight
+    return weights
+
+def average_weights(weights_list: List[Dict[str, float]]) -> Dict[str, float]:
+    """
+    Calcola la media dei pesi tra tutti i modelli locali.
+    
+    Args:
+    weights_list (List[Dict[str, float]]): Lista dei pesi di tutti i modelli locali.
+    
+    Returns:
+    Dict[str, float]: Dizionario dei pesi medi.
+    """
+    avg_weights = {}
+    for leaf_id in weights_list[0].keys():
+        avg_weights[leaf_id] = np.mean([w[leaf_id] for w in weights_list if leaf_id in w])
+    return avg_weights
+
+def update_tree(booster: xgb.Booster, tree_id: int, new_weights: Dict[str, float]):
+    """
+    Aggiorna i pesi di un albero specifico nel booster XGBoost.
+    
+    Args:
+    booster (xgb.Booster): Il booster XGBoost da aggiornare.
+    tree_id (int): L'ID dell'albero da aggiornare.
+    new_weights (Dict[str, float]): I nuovi pesi da applicare.
+    """
+    tree = booster.get_dump()[tree_id]
+    updated_tree = []
+    for line in tree.split('\n'):
+        if 'leaf' in line:
+            parts = line.split()
+            leaf_id = parts[0]
+            if leaf_id in new_weights:
+                parts[-1] = f"leaf={new_weights[leaf_id]}"
+            updated_line = ' '.join(parts)
+            updated_tree.append(updated_line)
+        else:
+            updated_tree.append(line)
+    
+    # Invece di usare update, ricostruiamo l'albero direttamente
+    updated_tree_str = '\n'.join(updated_tree)
+    booster.set_param({'updater': 'refresh'})
+    booster.load_model(io.StringIO(updated_tree_str))
+
 
 def upload_to_s3(file_name, bucket, object_name=None):
     """Carica un file su Amazon S3."""
@@ -272,8 +331,7 @@ def local_training_handler(event, context):
         y = np.array(decrypted_data['y'])
 
         # Addestra il modello locale
-        local_model = xgb.XGBClassifier()
-        local_model.fit(X, y)
+        local_model = train_local_model(X, y, global_model)
 
         # Carica il modello locale su S3
         dump(local_model, '/tmp/local_model.joblib')
@@ -293,8 +351,8 @@ def local_training_handler(event, context):
         }
 
 def global_aggregation_handler(event, context):
-    """Gestisce l'aggregazione globale dei modelli."""
-    logger.info("Starting global model aggregation")
+    """Gestisce l'aggregazione globale dei modelli usando FedAvg."""
+    logger.info("Starting global model aggregation using FedAvg")
 
     try:
         # Carica tutti i modelli locali
@@ -304,8 +362,8 @@ def global_aggregation_handler(event, context):
             local_model = load(f'/tmp/local_model_{client_id}.joblib')
             local_models.append(local_model)
 
-        # Aggrega i modelli
-        global_model = aggregate_models(local_models)
+        # Applica FedAvg
+        global_model = federated_averaging(local_models)
 
         # Carica il nuovo modello globale su S3
         dump(global_model, '/tmp/global_model.joblib')
@@ -315,16 +373,88 @@ def global_aggregation_handler(event, context):
         model_version = datetime.now().strftime("%Y%m%d_%H%M%S")
         upload_to_s3('/tmp/global_model.joblib', S3_BUCKET, f'global_model_v{model_version}.joblib')
 
-        logger.info("Global model aggregation completed")
+        logger.info("Global model aggregation completed using FedAvg")
 
         return {
             'statusCode': 200,
-            'body': json.dumps("Global model aggregated and uploaded successfully")
+            'body': json.dumps("Global model aggregated using FedAvg and uploaded successfully")
         }
     except Exception as e:
         logger.error(f"Error in global_aggregation_handler: {str(e)}")
         return {
             'statusCode': 500,
-            'body': json.dumps('Error during global aggregation')
+            'body': json.dumps('Error during global aggregation with FedAvg')
         }
 
+# Aggiungiamo una funzione per eseguire un round completo di Federated Learning
+def federated_learning_round(clients, global_model):
+    """
+    Esegue un round completo di Federated Learning.
+
+    Args:
+    clients (List[Dict]): Lista di client con i loro dati.
+    global_model (xgb.XGBClassifier): Il modello globale corrente.
+
+    Returns:
+    xgb.XGBClassifier: Il nuovo modello globale aggiornato.
+    """
+    local_models = []
+    for client in clients:
+        X, y = client['X'], client['y']
+        local_model = train_local_model(X, y, global_model)
+        local_models.append(local_model)
+    
+    new_global_model = federated_averaging(local_models)
+    return new_global_model
+
+# Funzione principale per eseguire il processo di Federated Learning
+def run_federated_learning(num_rounds=10, num_clients=5):
+    """
+    Esegue il processo completo di Federated Learning per un numero specificato di round.
+
+    Args:
+    num_rounds (int): Numero di round di Federated Learning da eseguire.
+    num_clients (int): Numero di client da simulare.
+
+    Returns:
+    xgb.XGBClassifier: Il modello globale finale.
+    """
+    X, y, feature_columns = load_and_preprocess_data()
+    
+    # Inizializza il modello globale
+    global_model = create_base_model()
+
+    for round in range(num_rounds):
+        logger.info(f"Starting Federated Learning round {round + 1}/{num_rounds}")
+        
+        # Simula i dati dei client
+        clients = [
+            {'X': simulate_client_data(X, y)[0], 'y': simulate_client_data(X, y)[1]}
+            for _ in range(num_clients)
+        ]
+
+        # Esegue un round di Federated Learning
+        global_model = federated_learning_round(clients, global_model)
+
+        # Valuta il modello globale
+        y_pred = global_model.predict(X)
+        accuracy = (y_pred == y).mean()
+        logger.info(f"Round {round + 1} completed. Global model accuracy: {accuracy:.4f}")
+
+    logger.info("Federated Learning process completed")
+    return global_model
+
+# Aggiorniamo la funzione main per utilizzare il nuovo processo di Federated Learning
+if __name__ == "__main__":
+    logger.info("Starting Federated Learning process")
+    final_model = run_federated_learning(num_rounds=10, num_clients=5)
+    
+    # Salva il modello finale
+    dump(final_model, 'models/final_federated_model.joblib')
+    logger.info("Final model saved locally")
+
+    # Carica il modello finale su S3
+    upload_to_s3('models/final_federated_model.joblib', S3_BUCKET, 'final_federated_model.joblib')
+    logger.info("Final model uploaded to S3")
+
+    logger.info("Federated Learning process completed successfully")

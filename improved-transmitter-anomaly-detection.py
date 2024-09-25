@@ -195,7 +195,7 @@ def train_and_evaluate_model(X, y):
 
 def main():
     # Leggi tutti i file CSV nella cartella
-    file_paths = glob.glob('csv/measures_24h_before_events_device_*.csv')
+    file_paths = glob.glob('csv/measures_72h_before_events_device_*.csv')
 
     results = []
     devices_in_fault = []

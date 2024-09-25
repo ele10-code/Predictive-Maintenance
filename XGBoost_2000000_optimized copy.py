@@ -14,6 +14,7 @@ import seaborn as sns
 import os
 import warnings
 from joblib import Memory
+import glob
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
@@ -23,27 +24,37 @@ warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
 memory = Memory(location='.joblib_cache', verbose=0)
 
 # Create 'plots' folder if it doesn't exist
-if not os.path.exists('plots_xgboost_optimized_2000000'):
-    os.makedirs('plots_xgboost_optimized_2000000')
-    print("'plots_xgboost_optimized_2000000' folder created.")
+if not os.path.exists('plots_xgboost_multiclass'):
+    os.makedirs('plots_xgboost_multiclass')
+    print("'plots_xgboost_multiclass' folder created.")
 
-# Load cleaned data
+# Data cleaning function
+def clean_data(df):
+    df = df.copy()
+    df['value'] = pd.to_numeric(df['value'], errors='coerce')
+    if 'event_reference_value' in df.columns:
+        df['event_reference_value'] = pd.to_numeric(df['event_reference_value'], errors='coerce')
+    df = df.dropna(subset=['value', 'event_reference_value'])
+    if 'measure_date' in df.columns:
+        df['measure_date'] = pd.to_datetime(df['measure_date'], errors='coerce')
+    return df
+
+# Load and preprocess data
 @memory.cache
-def load_and_preprocess_data(device_id=None):
-    print("Loading cleaned data...")
-    data = pd.read_csv('csv/cleaned_data.csv', parse_dates=['measure_date'])
-    
-    if device_id:
-        data = data[data['device_id'] == device_id]  # Filtra i dati per device_id
+def load_and_preprocess_data():
+    print("Loading and cleaning data...")
+    file_list = glob.glob('csv/measures_72h_before_events_device_*.csv')
+    data_list = [clean_data(pd.read_csv(file, parse_dates=['measure_date'])) for file in file_list]
+    data = pd.concat(data_list, ignore_index=True)
     
     # Reduce dataset size
     sample_size = min(2000000, len(data))
     data_sampled = data.sample(n=sample_size, random_state=42)
     
     print("Creating target column...")
-    threshold = data_sampled['value'].quantile(0.75)
-    data_sampled['target'] = (data_sampled['value'] > threshold).astype(int)
-    
+    quantiles = data_sampled['value'].quantile([0.33, 0.66])
+    data_sampled['target'] = pd.cut(data_sampled['value'], bins=[-np.inf, quantiles[0.33], quantiles[0.66], np.inf], labels=[0, 1, 2])
+
     print("Target variable distribution:")
     print(data_sampled['target'].value_counts(normalize=True))
     
@@ -66,7 +77,6 @@ def load_and_preprocess_data(device_id=None):
     y = data_sampled['target'].loc[X.index]
     
     return X, y, feature_columns
-
 
 X, y, feature_columns = load_and_preprocess_data()
 
@@ -118,14 +128,7 @@ X_resampled_smotetomek, y_resampled_smotetomek = smotetomek.fit_resample(X_train
 adasyn = ADASYN(random_state=42, n_jobs=4)
 X_resampled_adasyn, y_resampled_adasyn = adasyn.fit_resample(X_train_clean, y_train_clean)
 
-print("Class distribution after SMOTEENN:")
-print(pd.Series(y_resampled_smoteenn).value_counts(normalize=True))
-print("Class distribution after SMOTETomek:")
-print(pd.Series(y_resampled_smotetomek).value_counts(normalize=True))
-print("Class distribution after ADASYN:")
-print(pd.Series(y_resampled_adasyn).value_counts(normalize=True))
-
-# Hyperparameter optimization with RandomizedSearchCV
+# Prepare the parameters for XGBoost
 xgb_param_distributions = {
     'n_estimators': [100, 200, 300, 400, 500, 600],
     'max_depth': [3, 5, 7, 9, 11],
@@ -139,31 +142,18 @@ xgb_param_distributions = {
     'reg_lambda': [0, 0.1, 1, 10]
 }
 
-def find_optimal_threshold(y_true, y_pred_proba, metric='f1'):
-    thresholds = np.arange(0.1, 1.0, 0.01)
-    scores = []
-    for threshold in thresholds:
-        y_pred = (y_pred_proba >= threshold).astype(int)
-        if metric == 'f1':
-            score = f1_score(y_true, y_pred)
-        elif metric == 'recall':
-            score = recall_score(y_true, y_pred)
-        scores.append(score)
-    optimal_threshold = thresholds[np.argmax(scores)]
-    return optimal_threshold
-
 # Train and evaluate XGBoost for all resampling techniques
 for name, X_resampled, y_resampled in [("SMOTEENN", X_resampled_smoteenn, y_resampled_smoteenn),
                                        ("SMOTETomek", X_resampled_smotetomek, y_resampled_smotetomek),
                                        ("ADASYN", X_resampled_adasyn, y_resampled_adasyn)]:
     print(f"\nTraining XGBoost with {name}...")
-    xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=4)
+    xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='mlogloss', n_jobs=4, num_class=3, objective='multi:softprob')
     
     # Use StratifiedKFold for cross-validation
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
     random_search = RandomizedSearchCV(estimator=xgb_model, param_distributions=xgb_param_distributions, 
-                                       n_iter=30, cv=cv, n_jobs=4, scoring='f1_macro', random_state=42)
+                                       n_iter=30, cv=cv, n_jobs=4, scoring='neg_log_loss', random_state=42)
     random_search.fit(X_resampled, y_resampled)
 
     print(f"Best parameters for XGBoost with {name}:", random_search.best_params_)
@@ -171,29 +161,21 @@ for name, X_resampled, y_resampled in [("SMOTEENN", X_resampled_smoteenn, y_resa
 
     # Model evaluation
     y_pred = best_model.predict(X_test_scaled)
-    y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+    y_pred_proba = best_model.predict_proba(X_test_scaled)
 
     print(f"\nClassification Report for XGBoost with {name}:")
     print(classification_report(y_test, y_pred))
 
-    print(f"\nAUC-ROC Score for XGBoost with {name}:")
-    print(roc_auc_score(y_test, y_pred_proba))
-
-    # Find optimal threshold
-    optimal_threshold = find_optimal_threshold(y_test, y_pred_proba, metric='recall')
-    y_pred_optimal = (y_pred_proba >= optimal_threshold).astype(int)
-
-    print(f"\nOptimal threshold for {name}:", optimal_threshold)
-    print(f"\nClassification Report with optimal threshold for {name}:")
-    print(classification_report(y_test, y_pred_optimal))
+    print(f"\nLog Loss for XGBoost with {name}:")
+    print(-roc_auc_score(y_test, y_pred_proba, multi_class='ovr'))
 
     # Confusion Matrix
     plt.figure(figsize=(10, 8))
-    sns.heatmap(confusion_matrix(y_test, y_pred_optimal), annot=True, fmt='d', cmap='Blues')
-    plt.title(f'Confusion Matrix - XGBoost with {name} (Optimal Threshold)')
+    sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Confusion Matrix - XGBoost with {name}')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
-    plt.savefig(f'plots_xgboost_optimized_2000000/confusion_matrix_XGBoost_{name}_optimal.png')
+    plt.savefig(f'plots_xgboost_multiclass/confusion_matrix_XGBoost_{name}.png')
     plt.close()
 
     # Feature Importance
@@ -206,19 +188,14 @@ for name, X_resampled, y_resampled in [("SMOTEENN", X_resampled_smoteenn, y_resa
     sns.barplot(x='importance', y='feature', data=feature_importance)
     plt.title(f'Feature Importance - XGBoost with {name}')
     plt.tight_layout()
-    plt.savefig(f'plots_xgboost_optimized_2000000/feature_importance_XGBoost_{name}.png')
+    plt.savefig(f'plots_xgboost_multiclass/feature_importance_XGBoost_{name}.png')
     plt.close()
 
     # Clear memory
-    del random_search, best_model, y_pred, y_pred_proba, y_pred_optimal
+    del random_search, best_model, y_pred, y_pred_proba
 
-print("\nVisualizations have been saved in the 'plots_xgboost_optimized_2000000' folder.")
+print("\nVisualizations have been saved in the 'plots_xgboost_multiclass' folder.")
 print("\nModeling completed.")
 
 # Clear joblib cache
 memory.clear()
-
-# Note: To monitor memory usage, you can use the memory_profiler package.
-# Install it with: pip install memory_profiler
-# Then run this script with: mprof run your_script.py
-# And visualize the results with: mprof plot

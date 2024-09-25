@@ -1,50 +1,136 @@
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
-import os
-import random
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.ensemble import IsolationForest
+from sklearn.covariance import EllipticEnvelope
+from sklearn.svm import OneClassSVM
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score, recall_score
+from imblearn.combine import SMOTEENN, SMOTETomek
+from imblearn.over_sampling import SMOTE 
+from imblearn.over_sampling import ADASYN, BorderlineSMOTE
+from imblearn.under_sampling import ClusterCentroids
 import xgboost as xgb
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import warnings
+from joblib import Memory
+import glob
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.covariance")
+warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
+warnings.filterwarnings("ignore", category=FutureWarning, module="imblearn")
 
 # Set up joblib for caching
-if not os.path.exists('plots_xgboost_optimized_2000000_track'):
-    os.makedirs('plots_xgboost_optimized_2000000_track')
-    print("'plots_xgboost_optimized_2000000_track' folder created.")
+memory = Memory(location='.joblib_cache', verbose=0)
 
-# Function to load and preprocess data for a specific device
-def load_device_data(device_id):
-    file_path = f'csv/measures_24h_before_events_device_{device_id}.csv'
-    data = pd.read_csv(file_path, parse_dates=['measure_date'])
+# Create 'plots' folder if it doesn't exist
+if not os.path.exists('plots_xgboost_multiclass_device_161'):
+    os.makedirs('plots_xgboost_multiclass_device_161')
+    print("'plots_xgboost_multiclass_device_161' folder created.")
+
+# Data cleaning function
+def clean_data(df):
+    df = df.copy()
+    df['value'] = pd.to_numeric(df['value'], errors='coerce')
+    if 'event_reference_value' in df.columns:
+        df['event_reference_value'] = pd.to_numeric(df['event_reference_value'], errors='coerce')
+    df = df.dropna(subset=['value', 'event_reference_value'])
+    if 'measure_date' in df.columns:
+        df['measure_date'] = pd.to_datetime(df['measure_date'], errors='coerce')
+    return df
+
+# Load and preprocess data
+@memory.cache
+def load_and_preprocess_data():
+    print("Loading and cleaning data...")
+    file_list = glob.glob('csv/measures_72h_before_events_device_*.csv')
+    data_list = [clean_data(pd.read_csv(file, parse_dates=['measure_date'], low_memory=False)) for file in file_list]
+    data = pd.concat(data_list, ignore_index=True)
     
-    # Convert 'value' column to numeric, forcing errors to NaN
-    data['value'] = pd.to_numeric(data['value'], errors='coerce')
+    # Reduce dataset size
+    sample_size = min(2000000, len(data))
+    data_sampled = data.sample(n=sample_size, random_state=42)
+    
+    print("Creating target column...")
+    quantiles = data_sampled['value'].quantile([0.33, 0.66])
+    data_sampled['target'] = pd.cut(data_sampled['value'], bins=[-np.inf, quantiles[0.33], quantiles[0.66], np.inf], labels=[0, 1, 2])
+
+    print("Target variable distribution:")
+    print(data_sampled['target'].value_counts(normalize=True))
     
     # Feature engineering
-    data['hour'] = data['measure_date'].dt.hour
-    data['day_of_week'] = data['measure_date'].dt.dayofweek
-    data['month'] = data['measure_date'].dt.month
-    data['is_weekend'] = data['day_of_week'].isin([5, 6]).astype(int)
+    data_sampled['hour'] = data_sampled['measure_date'].dt.hour
+    data_sampled['day_of_week'] = data_sampled['measure_date'].dt.dayofweek
+    data_sampled['month'] = data_sampled['measure_date'].dt.month
+    data_sampled['is_weekend'] = data_sampled['day_of_week'].isin([5, 6]).astype(int)
     
     # Lag features and rolling statistics
-    data = data.sort_values('measure_date')
-    data['value_lag_1'] = data.groupby('event_variable')['value'].shift(1)
-    data['value_rolling_mean'] = data.groupby('event_variable')['value'].rolling(window=24, min_periods=1).mean().reset_index(0, drop=True)
-    
-    # Drop rows with NaN values in the features or target
-    data = data.dropna(subset=['value'] + ['value_lag_1', 'value_rolling_mean'])
+    data_sampled = data_sampled.sort_values('measure_date')
+    data_sampled['value_lag_1'] = data_sampled.groupby('event_variable')['value'].shift(1)
+    data_sampled['value_rolling_mean'] = data_sampled.groupby('event_variable')['value'].rolling(window=24, min_periods=1).mean().reset_index(0, drop=True)
     
     feature_columns = ['event_reference_value', 'hour', 'day_of_week', 'month', 'is_weekend', 
                        'value_lag_1', 'value_rolling_mean']
     
     # Prepare data for modeling
-    X = data[feature_columns]
-    y = (data['value'] > data['value'].quantile(0.75)).astype(int)
+    X = data_sampled[feature_columns].dropna()
+    y = data_sampled['target'].loc[X.index]
     
-    return X, y
+    return X, y, feature_columns
 
-# Hyperparameter search space
+X, y, feature_columns = load_and_preprocess_data()
+
+# Split the data
+# Divisione dei dati in set di training (80%) e test (20%), stratificando in base alla variabile target per mantenere la distribuzione delle classi.
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# Use RobustScaler
+scaler = RobustScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Outlier detection
+print("Performing outlier detection...")
+outlier_fraction = 0.01
+
+# Isolation Forest
+iso_forest = IsolationForest(contamination=outlier_fraction, random_state=42, n_jobs=4)
+iso_forest_labels = iso_forest.fit_predict(X_train_scaled)
+
+# Elliptic Envelope with increased support_fraction
+ee = EllipticEnvelope(contamination=outlier_fraction, random_state=42, support_fraction=0.7)
+ee_labels = ee.fit_predict(X_train_scaled)
+
+# One-Class SVM
+oc_svm = OneClassSVM(nu=outlier_fraction)
+oc_svm_labels = oc_svm.fit_predict(X_train_scaled)
+
+# Combine outlier detection results
+outlier_mask = (iso_forest_labels == -1) | (ee_labels == -1) | (oc_svm_labels == -1)
+
+# Remove outliers from training data
+X_train_clean = X_train_scaled[~outlier_mask]
+y_train_clean = y_train[~outlier_mask]
+
+print(f"Removed {sum(outlier_mask)} outliers from training data.")
+
+# Advanced resampling techniques
+print("Applying advanced resampling techniques...")
+
+# Use various resampling techniques
+resampling_techniques = {
+    'SMOTEENN': SMOTEENN(random_state=42, smote=SMOTE(random_state=42, k_neighbors=5)),
+    'SMOTETomek': SMOTETomek(random_state=42),
+    'ADASYN': ADASYN(random_state=42),
+    'BorderlineSMOTE': BorderlineSMOTE(random_state=42),
+    'ClusterCentroids': ClusterCentroids(random_state=42)  # Under-sampling
+}
+
+# Prepare the parameters for XGBoost
 xgb_param_distributions = {
     'n_estimators': [100, 200, 300, 400, 500, 600],
     'max_depth': [3, 5, 7, 9, 11],
@@ -52,87 +138,71 @@ xgb_param_distributions = {
     'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
     'colsample_bytree': [0.6, 0.7, 0.8, 0.9, 1.0],
     'min_child_weight': [1, 3, 5, 7],
-    'scale_pos_weight': [1, 3, 5, 7, 9],
     'gamma': [0, 0.1, 0.2, 0.3, 0.4],
     'reg_alpha': [0, 0.1, 1, 10],
     'reg_lambda': [0, 0.1, 1, 10]
 }
 
-device_ids = ['18', '19', '63','123', ' 147']  # Lista dei device ID
+# Train and evaluate XGBoost for all resampling techniques
+best_model = None
+best_name = ""
+best_score = float("inf")
 
-# Simuliamo più iterazioni (o epoche) per ogni dispositivo
-iterations = list(range(1, 11))  # Supponiamo 10 iterazioni
-
-# Metrics collection
-performance_metrics = {
-    'device_id': [],
-    'iteration': [],
-    'accuracy': [],
-    'f1_score': [],
-    'roc_auc_score': []
-}
-
-for device_id in device_ids:
-    for iteration in iterations:
-        X, y = load_device_data(device_id)
-        
-        # Split the data
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=random.randint(1, 100), stratify=y)
-
-        # Scale the data
-        scaler = RobustScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # XGBoost model and hyperparameter search
-        xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=4)
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        
-        random_search = RandomizedSearchCV(estimator=xgb_model, param_distributions=xgb_param_distributions, 
-                                           n_iter=30, cv=cv, n_jobs=4, scoring='f1_macro', random_state=42)
-        random_search.fit(X_train_scaled, y_train)
-
-        best_model = random_search.best_estimator_
-
-        # Model evaluation
-        y_pred = best_model.predict(X_test_scaled)
-        y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
-
-        # Collect metrics
-        accuracy = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
-        roc_auc = roc_auc_score(y_test, y_pred_proba)
-        
-        performance_metrics['device_id'].append(device_id)
-        performance_metrics['iteration'].append(iteration)
-        performance_metrics['accuracy'].append(accuracy)
-        performance_metrics['f1_score'].append(f1)
-        performance_metrics['roc_auc_score'].append(roc_auc)
-        
-        print(f"Device {device_id}, Iteration {iteration} - Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, AUC-ROC: {roc_auc:.4f}")
-
-# Convert to DataFrame
-metrics_df = pd.DataFrame(performance_metrics)
-metrics_df.to_csv('metrics_results.csv', index=False)  # Salva i risultati in un CSV
-
-# Plotting results for each device
-for device_id in device_ids:
-    device_data = metrics_df[metrics_df['device_id'] == device_id]
+for name, resampling_technique in resampling_techniques.items():
+    print(f"\nTraining XGBoost with {name}...")
     
+    X_resampled, y_resampled = resampling_technique.fit_resample(X_train_clean, y_train_clean)
+    
+    xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='mlogloss', n_jobs=4, num_class=3, objective='multi:softprob')
+    
+    # Use StratifiedKFold for cross-validation
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    
+    random_search = RandomizedSearchCV(estimator=xgb_model, param_distributions=xgb_param_distributions, 
+                                       n_iter=30, cv=cv, n_jobs=4, scoring='neg_log_loss', random_state=42)
+    random_search.fit(X_resampled, y_resampled)
+
+    print(f"Best parameters for XGBoost with {name}:", random_search.best_params_)
+    current_best_model = random_search.best_estimator_
+
+    # Model evaluation
+    y_pred = current_best_model.predict(X_test_scaled)
+    y_pred_proba = current_best_model.predict_proba(X_test_scaled)
+
+    log_loss_score = -roc_auc_score(y_test, y_pred_proba, multi_class='ovr')
+    print(f"\nLog Loss for XGBoost with {name}: {log_loss_score}")
+
+    if log_loss_score < best_score:
+        best_score = log_loss_score
+        best_model = current_best_model
+        best_name = name
+
+    # Confusion Matrix
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Confusion Matrix - XGBoost with {name}')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.savefig(f'plots_xgboost_multiclass_device_161/confusion_matrix_XGBoost_{name}.png')
+    plt.close()
+
+    # Feature Importance
+    feature_importance = pd.DataFrame({
+        'feature': feature_columns,
+        'importance': current_best_model.feature_importances_
+    }).sort_values('importance', ascending=False)
+
     plt.figure(figsize=(10, 6))
-
-    # Plot con linee continue
-    plt.plot(device_data['iteration'], device_data['accuracy'], marker='o', linestyle='-', color='blue', label='Accuracy')
-    plt.plot(device_data['iteration'], device_data['f1_score'], marker='s', linestyle='-', color='green', label='F1 Score')
-    plt.plot(device_data['iteration'], device_data['roc_auc_score'], marker='^', linestyle='-', color='red', label='ROC-AUC')
-
-    plt.title(f"Performance del Modello per Dispositivo {device_id}")
-    plt.xlabel("Iterazione del Modello")
-    plt.ylabel("Metriche di Performance")
-    plt.legend(loc='best')
-    plt.grid(True)
+    sns.barplot(x='importance', y='feature', data=feature_importance)
+    plt.title(f'Feature Importance - XGBoost with {name}')
     plt.tight_layout()
+    plt.savefig(f'plots_xgboost_multiclass_device_161/feature_importance_XGBoost_{name}.png')
+    plt.close()
 
-    # Salva il grafico per ogni dispositivo
-    plt.savefig(f'plots_xgboost_optimized_2000000/smoothed_performance_chart_device_{device_id}.png')
-    plt.show()
+    # Clear memory
+    del random_search, current_best_model, y_pred, y_pred_proba
+
+print(f"\nBest model was trained with {best_name} resampling technique with Log Loss: {best_score}")
+print("\nVisualizations have been saved in the 'plots_xgboost_multiclass_device_161' folder.")
+print("\nModeling completed.")
+

@@ -178,7 +178,7 @@ def main():
             FROM txControl.devices d
             JOIN txControl.device_models dm ON d.id_device_model = dm.ID
             WHERE dm.id_device_type = 1;
-            """
+            """ 
             cursor.execute(device_query)
             devices = cursor.fetchall()
 

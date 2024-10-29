@@ -153,10 +153,6 @@ X_resampled_smotetomek, y_resampled_smotetomek = smotetomek.fit_resample(
     X_train_clean, y_train_clean
 )
 
-adasyn = ADASYN(random_state=42, n_jobs=-1)
-X_resampled_adasyn, y_resampled_adasyn = adasyn.fit_resample(
-    X_train_clean, y_train_clean
-)
 
 # XGBoost parameters
 xgb_param_distributions = {
@@ -178,8 +174,7 @@ best_name = ""
 
 for name, X_resampled, y_resampled in [
     ("SMOTEENN", X_resampled_smoteenn, y_resampled_smoteenn),
-    ("SMOTETomek", X_resampled_smotetomek, y_resampled_smotetomek),
-    ("ADASYN", X_resampled_adasyn, y_resampled_adasyn)
+    ("SMOTETomek", X_resampled_smotetomek, y_resampled_smotetomek)
 ]:
     print(f"\nTraining XGBoost with {name}...")
     xgb_model = xgb.XGBClassifier(
@@ -325,7 +320,7 @@ def analyze_multiple_devices(device_ids, best_model, scaler, feature_columns):
         plt.close()
 
 # List of devices to analyze
-device_ids = [114, 93]
+device_ids = [144, 113, 126]
 
 # Call the function to analyze multiple devices and generate the plots
 analyze_multiple_devices(device_ids, best_model, scaler, feature_columns)

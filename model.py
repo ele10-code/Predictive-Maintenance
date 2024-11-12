@@ -139,24 +139,41 @@ y_train_clean = y_train.reset_index(drop=True)[~outlier_mask]
 
 print(f"Removed {sum(outlier_mask)} outliers from training data.")
 
+# Check class distribution after outlier removal
+print("Class distribution after outlier removal:")
+class_counts = pd.Series(y_train_clean).value_counts()
+print(class_counts)
+
 # Advanced resampling techniques on the training set
 print("Applying advanced resampling techniques...")
 
+# Initialize resampling methods
+resampling_methods = []
+
+# SMOTEENN
 smote = SMOTE(random_state=42, n_jobs=-1)
 smoteenn = SMOTEENN(random_state=42, smote=smote, n_jobs=-1)
 X_resampled_smoteenn, y_resampled_smoteenn = smoteenn.fit_resample(
     X_train_clean, y_train_clean
 )
+resampling_methods.append(("SMOTEENN", X_resampled_smoteenn, y_resampled_smoteenn))
 
+# SMOTETomek
 smotetomek = SMOTETomek(random_state=42, n_jobs=-1)
 X_resampled_smotetomek, y_resampled_smotetomek = smotetomek.fit_resample(
     X_train_clean, y_train_clean
 )
+resampling_methods.append(("SMOTETomek", X_resampled_smotetomek, y_resampled_smotetomek))
 
-adasyn = ADASYN(random_state=42, n_jobs=-1)
-X_resampled_adasyn, y_resampled_adasyn = adasyn.fit_resample(
-    X_train_clean, y_train_clean
-)
+# ADASYN with error handling
+try:
+    adasyn = ADASYN(random_state=42, n_jobs=-1)
+    X_resampled_adasyn, y_resampled_adasyn = adasyn.fit_resample(
+        X_train_clean, y_train_clean
+    )
+    resampling_methods.append(("ADASYN", X_resampled_adasyn, y_resampled_adasyn))
+except ValueError as e:
+    print(f"Skipping ADASYN due to error: {e}")
 
 # XGBoost parameters
 xgb_param_distributions = {
@@ -176,11 +193,7 @@ best_model = None
 best_score = float("-inf")  # We will maximize F1 score
 best_name = ""
 
-for name, X_resampled, y_resampled in [
-    ("SMOTEENN", X_resampled_smoteenn, y_resampled_smoteenn),
-    ("SMOTETomek", X_resampled_smotetomek, y_resampled_smotetomek),
-    ("ADASYN", X_resampled_adasyn, y_resampled_adasyn)
-]:
+for name, X_resampled, y_resampled in resampling_methods:
     print(f"\nTraining XGBoost with {name}...")
     xgb_model = xgb.XGBClassifier(
         random_state=42,
@@ -277,7 +290,7 @@ def analyze_multiple_devices(device_ids, best_model, scaler, feature_columns):
             print(f"No files found for device {device_id}.")
             continue
 
-        # Load and concatenate all monthly CSV files for the device
+        # Load and concatenate all CSV files for the device
         df_list = []
         for file in device_files:
             df = pd.read_csv(file, parse_dates=['measure_date'], low_memory=False)
@@ -325,7 +338,7 @@ def analyze_multiple_devices(device_ids, best_model, scaler, feature_columns):
         plt.close()
 
 # List of devices to analyze
-device_ids = [114, 96]
+device_ids = [ 126]
 
 # Call the function to analyze multiple devices and generate the plots
 analyze_multiple_devices(device_ids, best_model, scaler, feature_columns)

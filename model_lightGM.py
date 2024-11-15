@@ -324,9 +324,9 @@ def train_and_evaluate_model(X, y, feature_columns):
     return best_model, scaler
 
   
-def analyze_device(device_id, model, scaler, feature_columns):
+def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
     """
-    Analyze a specific device using the trained model.
+    Analyze a specific device using the trained model, filtering output for a specific class.
     """
     print(f"\nAnalyzing device {device_id}...")
     device_plot_folder = f'plots_lightgbm_device_{device_id}'
@@ -347,7 +347,7 @@ def analyze_device(device_id, model, scaler, feature_columns):
             df = pd.read_csv(file, parse_dates=['measure_date'], low_memory=False)
             df = clean_data(df)
             df_list.append(df)
-        df = pd.concat(df_list, ignore_index=True)
+        df = pd.concat(df_list, ignore_index=True).copy()
 
         # Feature engineering
         df['hour'] = df['measure_date'].dt.hour
@@ -373,7 +373,7 @@ def analyze_device(device_id, model, scaler, feature_columns):
         df['value_rolling_max'] = grouped['value'].rolling(window=24, min_periods=1).max().reset_index(0, drop=True)
 
         # Drop rows with NaN values
-        df = df.dropna()
+        df = df.dropna().copy()
 
         # Select features and scale
         X_device = df[feature_columns]
@@ -383,84 +383,41 @@ def analyze_device(device_id, model, scaler, feature_columns):
         y_pred = model.predict(X_device_scaled)
         y_pred_proba = model.predict_proba(X_device_scaled)
 
-        # Add predictions to dataframe using .loc to avoid SettingWithCopyWarning
+        # Add predictions to dataframe
         df.loc[:, 'predicted_class'] = y_pred
         
         # Calculate prediction probabilities
         for i in range(3):
             df.loc[:, f'probability_class_{i}'] = y_pred_proba[:, i]
 
-        # Stampa dei risultati predetti con output verboso
+        # Filtra per la classe specificata
+        df_filtered = df[df['predicted_class'] == target_class]
+
+        # Stampa dei risultati predetti per la classe specifica
         class_descriptions = {
             0: "Classe 0: Normale",
             1: "Classe 1: Anomalo",
             2: "Classe 2: Fault"
         }
+        description = class_descriptions.get(target_class, "Descrizione non disponibile")
 
-        print("\nPredizioni con descrizioni:")
-        for i, row in df.iterrows():
-            predicted_class = row['predicted_class']
-            description = class_descriptions.get(predicted_class, "Descrizione non disponibile")
-            print(f"Data: {row['measure_date']}, Valore: {row['value']}, Classe predetta: {predicted_class} - {description}")
+        print(f"\nPredizioni per la classe {target_class} - {description}:")
+        for i, row in df_filtered.iterrows():
+            print(f"Data: {row['measure_date']}, Valore: {row['value']}, Classe predetta: {row['predicted_class']} - {description}")
+
+        if df_filtered.empty:
+            print(f"\nNessuna predizione per la classe {target_class} trovata.")
 
         # Analysis results
-        print("\nPrediction distribution:")
+        print("\nPrediction distribution for the filtered class:")
         print(pd.Series(y_pred).value_counts(normalize=True))
 
-        # Plot predictions over time
-        plt.figure(figsize=(15, 6))
-        plt.plot(df['measure_date'], df['value'], label='Actual Value', alpha=0.5)
-        plt.scatter(df['measure_date'], df['value'], c=df['predicted_class'], 
-                   cmap='viridis', label='Predicted Class')
-        plt.title(f'Values and Predictions Over Time - Device {device_id}')
-        plt.xlabel('Date')
-        plt.ylabel('Value')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f'{device_plot_folder}/predictions_over_time_device_{device_id}.png')
-        plt.close()
-
-        # Plot prediction probabilities distribution
-        plt.figure(figsize=(12, 6))
-        for i in range(3):
-            sns.kdeplot(data=df[f'probability_class_{i}'], label=f'Class {i}')
-        plt.title(f'Prediction Probability Distributions - Device {device_id}')
-        plt.xlabel('Probability')
-        plt.ylabel('Density')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f'{device_plot_folder}/prediction_probabilities_device_{device_id}.png')
-        plt.close()
-
-        # Calculate daily statistics
-        daily_stats = df.groupby(df['measure_date'].dt.date).agg({
-            'value': ['mean', 'std', 'min', 'max'],
-            'predicted_class': lambda x: pd.Series(x).value_counts().index[0]
-        })
-        daily_stats.columns = ['daily_mean', 'daily_std', 'daily_min', 'daily_max', 'most_common_class']
-        
-        print("\nDaily statistics summary:")
-        print(daily_stats.describe())
-
-        # Save analysis results
-        analysis_results = {
-            'device_id': device_id,
-            'total_measurements': len(df),
-            'prediction_distribution': pd.Series(y_pred).value_counts().to_dict(),
-            'daily_stats': daily_stats.to_dict(),
-            'timestamp': pd.Timestamp.now()
-        }
-        
-        # Save to file
-        with open(f'{device_plot_folder}/analysis_results_{device_id}.txt', 'w') as f:
-            for key, value in analysis_results.items():
-                f.write(f"{key}:\n{value}\n\n")
-
-        return df, analysis_results
+        return df_filtered, None
         
     except Exception as e:
         print(f"Error analyzing device {device_id}: {str(e)}")
         return None, None
+
 
 def analyze_multiple_devices(device_ids, model, scaler, feature_columns):
     """

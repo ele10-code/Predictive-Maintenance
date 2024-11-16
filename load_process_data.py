@@ -83,7 +83,8 @@ def process_device(id_device, db_user, db_password, db_name, host, port, year):
                 event_date = pd.to_datetime(date_start).date()
 
                 # Define the start and end of the day
-                day_start = datetime.combine(event_date, datetime.min.time())
+                # day_start = datetime.combine(event_date, datetime.min.time())
+                day_start = date_start - pd.Timedelta(days=7)
                 day_end = datetime.combine(event_date, datetime.max.time())
 
                 # Query to get all measures on the day of the event

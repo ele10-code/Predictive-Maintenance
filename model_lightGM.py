@@ -402,8 +402,8 @@ def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
         description = class_descriptions.get(target_class, "Descrizione non disponibile")
 
         print(f"\nPredizioni per la classe {target_class} - {description}:")
-        for i, row in df_filtered.iterrows():
-            print(f"Data: {row['measure_date']}, Valore: {row['value']}, Classe predetta: {row['predicted_class']} - {description}")
+        # for i, row in df_filtered.iterrows():
+        #     print(f"Data: {row['measure_date']}, Valore: {row['value']}, Classe predetta: {row['predicted_class']} - {description}")
 
         if df_filtered.empty:
             print(f"\nNessuna predizione per la classe {target_class} trovata.")
@@ -486,7 +486,10 @@ def main():
         # Analyze specific devices
         device_ids = [126]  # Add more device IDs as needed
         print("\nAnalyzing specific devices...")
+        predicted_class = analyze_device(device_ids, best_model, scaler, feature_columns)
+        print(f"The device {device_id} was classified in class: {predicted_class}")
         results = analyze_multiple_devices(device_ids, best_model, scaler, feature_columns)
+        print("IL risultato per il device è: ", results)
         
         print("\nAnalysis complete!")
         return results

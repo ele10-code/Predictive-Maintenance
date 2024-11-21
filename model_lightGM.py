@@ -209,110 +209,15 @@ def plot_feature_importance(model, feature_columns, title_suffix, folder):
     
     return feature_importance
   
-def train_and_evaluate_model(X, y, feature_columns):
-    """
-    Train and evaluate the LightGBM model with optimized parameters.
-    """
-    print("Starting model training and evaluation...")
+
+    plt.tight_layout()
+    plt.savefig(f'{plot_folder}/model_performance_iterations.png')
+    plt.close()
     
-    # Split the data
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
-    )
-
-    # Scale features
-    scaler = RobustScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_test_scaled = scaler.transform(X_test)
-
-    # Detect and remove outliers
-    outlier_mask = detect_outliers(X_train_scaled)
-    X_train_clean = X_train_scaled[outlier_mask]
-    y_train_clean = y_train.reset_index(drop=True)[outlier_mask]
-
-    print("Class distribution after outlier removal:")
-    print(pd.Series(y_train_clean).value_counts())
-
-    # Initialize resampling methods
-    print("\nApplying SMOTEENN for balanced training...")
-    try:
-        smoteenn = SMOTEENN(random_state=42, n_jobs=-1)
-        X_resampled, y_resampled = smoteenn.fit_resample(X_train_clean, y_train_clean)
-    except Exception as e:
-        print(f"SMOTEENN failed: {str(e)}. Using original data.")
-        X_resampled, y_resampled = X_train_clean, y_train_clean
-
-    # Optimized LightGBM parameters
-    lgb_param_distributions = {
-        'n_estimators': [100, 200],
-        'max_depth': [3, 5, 7],
-        'learning_rate': [0.1, 0.2],
-        'num_leaves': [31, 63],
-        'min_child_samples': [50],
-        'subsample': [0.8, 0.9],
-        'colsample_bytree': [0.8, 0.9],
-        'reg_alpha': [0.1, 1],
-        'reg_lambda': [0.1, 1],
-        'min_split_gain': [0.1],
-        'min_gain_to_split': [0.1]
-    }
-
-    # Initialize and train LightGBM
-    print("\nTraining LightGBM model...")
-    lgb_model = lgb.LGBMClassifier(
-        objective='multiclass',
-        num_class=3,
-        random_state=42,
-        verbose=-1,
-        n_jobs=-1,
-        importance_type='gain',
-        min_gain_to_split=0.1,
-        min_data_in_leaf=50,
-        max_cat_threshold=64
-    )
-
-    # Hyperparameter tuning
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    random_search = RandomizedSearchCV(
-        estimator=lgb_model,
-        param_distributions=lgb_param_distributions,
-        n_iter=10,
-        cv=cv,
-        n_jobs=-1,
-        scoring='f1_weighted',
-        random_state=42,
-        verbose=0
-    )
-
-    # Fit model with error handling
-    try:
-        random_search.fit(X_resampled, y_resampled)
-    except Exception as e:
-        print(f"Model training failed: {str(e)}")
-        raise
-
-    best_model = random_search.best_estimator_
-    print("Best parameters:", random_search.best_params_)
-
-    # Evaluate model
-    y_val_pred = best_model.predict(X_val_scaled)
-    val_f1 = f1_score(y_val, y_val_pred, average='weighted')
-    print(f"\nValidation F1 Score: {val_f1:.4f}")
-    print("\nValidation Classification Report:")
-    print(classification_report(y_val, y_val_pred))
-
-    # Plot validation results
-    plot_results(y_val, y_val_pred, "LightGBM - Validation", plot_folder)
-    feature_importance = plot_feature_importance(best_model, feature_columns, "LightGBM", plot_folder)
-    print("\nTop 5 most important features:")
-    print(feature_importance.head())
-
-    # Evaluate on test set
-    y_test_pred = best_model.predict(X_test_scaled)
+    print("\nModel performance tracking saved.")
+    
+    # Evaluate on test set after final iteration
+    y_test_pred = lgb_model.predict(X_test_scaled)
     test_f1 = f1_score(y_test, y_test_pred, average='weighted')
     print(f"\nTest F1 Score: {test_f1:.4f}")
     print("\nTest Classification Report:")
@@ -321,17 +226,52 @@ def train_and_evaluate_model(X, y, feature_columns):
     # Plot test results
     plot_results(y_test, y_test_pred, "LightGBM - Test", plot_folder)
 
-    return best_model, scaler
+    return lgb_model, scaler
+
+def evaluate_model_iterations(model, X, y, iterations, scaler, feature_columns, folder, device_id):
+    """
+    Evaluate the model over multiple iterations and plot performance.
+    """
+    print(f"\nEvaluating model for {iterations} iterations on device {device_id}...")
+    f1_scores = []
+    
+    for i in range(iterations):
+        # Split the data into train-test
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=i, stratify=y
+        )
+        
+        # Scale the features
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Train the model
+        model.fit(X_train_scaled, y_train)
+        
+        # Predict and calculate F1 score
+        y_pred = model.predict(X_test_scaled)
+        f1 = f1_score(y_test, y_pred, average='weighted')
+        f1_scores.append(f1)
+    
+    # Plot the F1 scores over iterations
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, iterations + 1), f1_scores, marker='o')
+    plt.title(f'F1 Score Over {iterations} Iterations - Device {device_id}')
+    plt.xlabel('Iteration')
+    plt.ylabel('F1 Score')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f'{folder}/f1_iterations_device_{device_id}.png')
+    plt.close()
+    
+    print(f"Performance plot for device {device_id} saved to {folder}/f1_iterations_device_{device_id}.png")
 
   
-def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
+def analyze_device(device_id, model, scaler, feature_columns):
     """
-    Analyze a specific device using the trained model, filtering output for a specific class.
+    Analyze a specific device using the trained model and return the most common predicted class.
     """
     print(f"\nAnalyzing device {device_id}...")
-    device_plot_folder = f'plots_lightgbm_device_{device_id}'
-    os.makedirs(device_plot_folder, exist_ok=True)
-
     try:
         # Load device files
         file_pattern = f'csv/device_{device_id}/measures_device_{device_id}_*.csv'
@@ -339,7 +279,7 @@ def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
 
         if not device_files:
             print(f"No files found for device {device_id}.")
-            return None, None
+            return None
 
         # Load and preprocess device data
         df_list = []
@@ -355,8 +295,8 @@ def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
         df['month'] = df['measure_date'].dt.month
         df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
         df['is_business_hours'] = ((df['hour'] >= 9) & 
-                                  (df['hour'] <= 17) & 
-                                  ~df['is_weekend']).astype(int)
+                                   (df['hour'] <= 17) & 
+                                   ~df['is_weekend']).astype(int)
 
         # Time-based features
         df = df.sort_values('measure_date')
@@ -381,42 +321,16 @@ def analyze_device(device_id, model, scaler, feature_columns, target_class=2):
 
         # Make predictions
         y_pred = model.predict(X_device_scaled)
-        y_pred_proba = model.predict_proba(X_device_scaled)
 
-        # Add predictions to dataframe
-        df.loc[:, 'predicted_class'] = y_pred
-        
-        # Calculate prediction probabilities
-        for i in range(3):
-            df.loc[:, f'probability_class_{i}'] = y_pred_proba[:, i]
+        # Return the most common predicted class
+        most_common_class = pd.Series(y_pred).mode()[0]
+        print(f"\nDevice {device_id} was classified in class: {most_common_class}")
+        return most_common_class
 
-        # Filtra per la classe specificata
-        df_filtered = df[df['predicted_class'] == target_class]
-
-        # Stampa dei risultati predetti per la classe specifica
-        class_descriptions = {
-            0: "Classe 0: Normale",
-            1: "Classe 1: Anomalo",
-            2: "Classe 2: Fault"
-        }
-        description = class_descriptions.get(target_class, "Descrizione non disponibile")
-
-        print(f"\nPredizioni per la classe {target_class} - {description}:")
-        # for i, row in df_filtered.iterrows():
-        #     print(f"Data: {row['measure_date']}, Valore: {row['value']}, Classe predetta: {row['predicted_class']} - {description}")
-
-        if df_filtered.empty:
-            print(f"\nNessuna predizione per la classe {target_class} trovata.")
-
-        # Analysis results
-        print("\nPrediction distribution for the filtered class:")
-        print(pd.Series(y_pred).value_counts(normalize=True))
-
-        return df_filtered, None
-        
     except Exception as e:
         print(f"Error analyzing device {device_id}: {str(e)}")
-        return None, None
+        return None
+
 
 
 def analyze_multiple_devices(device_ids, model, scaler, feature_columns):
@@ -462,9 +376,6 @@ def analyze_multiple_devices(device_ids, model, scaler, feature_columns):
     return all_results
 
 def main():
-    """
-    Main execution function.
-    """
     try:
         print("Starting predictive maintenance analysis...")
         
@@ -483,20 +394,28 @@ def main():
         print(f"Model saved to {model_filename}")
         print(f"Scaler saved to {scaler_filename}")
         
-        # Analyze specific devices
-        device_ids = [126]  # Add more device IDs as needed
-        print("\nAnalyzing specific devices...")
-        predicted_class = analyze_device(device_ids, best_model, scaler, feature_columns)
-        print(f"The device {device_id} was classified in class: {predicted_class}")
-        results = analyze_multiple_devices(device_ids, best_model, scaler, feature_columns)
-        print("IL risultato per il device è: ", results)
+        # Analyze specific devices and evaluate iterations
+        device_ids = [118, 126, 226, 114]  # Add more device IDs as needed
+        for device_id in device_ids:
+            predicted_class = analyze_device(device_id, best_model, scaler, feature_columns)
+            if predicted_class is not None:
+                print(f"The device {device_id} was classified in class: {predicted_class}")
+                
+                # Evaluate and plot performance over 100 iterations
+                evaluate_model_iterations(
+                    best_model, X, y, iterations=100, scaler=scaler, 
+                    feature_columns=feature_columns, folder=plot_folder, device_id=device_id
+                )
+            else:
+                print(f"Analysis for device {device_id} failed.")
         
         print("\nAnalysis complete!")
-        return results
         
     except Exception as e:
         print(f"Error in main execution: {str(e)}")
         return None
+
+
 
 if __name__ == "__main__":
     main()

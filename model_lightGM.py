@@ -228,43 +228,127 @@ def plot_feature_importance(model, feature_columns, title_suffix, folder):
 
     return lgb_model, scaler
 
-def evaluate_model_iterations(model, X, y, iterations, scaler, feature_columns, folder, device_id):
+
+def train_and_evaluate_model(X, y, feature_columns, n_iterations=100):
     """
-    Evaluate the model over multiple iterations and plot performance.
+    Train and evaluate the LightGBM model with optimized parameters across multiple iterations.
     """
-    print(f"\nEvaluating model for {iterations} iterations on device {device_id}...")
-    f1_scores = []
+    print("Starting model training and evaluation...")
     
-    for i in range(iterations):
-        # Split the data into train-test
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=i, stratify=y
-        )
-        
-        # Scale the features
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # Train the model
-        model.fit(X_train_scaled, y_train)
-        
-        # Predict and calculate F1 score
-        y_pred = model.predict(X_test_scaled)
-        f1 = f1_score(y_test, y_pred, average='weighted')
-        f1_scores.append(f1)
-    
-    # Plot the F1 scores over iterations
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, iterations + 1), f1_scores, marker='o')
-    plt.title(f'F1 Score Over {iterations} Iterations - Device {device_id}')
+    # Split the data
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
+    )
+
+    # Scale features
+    scaler = RobustScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Detect and remove outliers
+    outlier_mask = detect_outliers(X_train_scaled)
+    X_train_clean = X_train_scaled[outlier_mask]
+    y_train_clean = y_train.reset_index(drop=True)[outlier_mask]
+
+    print("Class distribution after outlier removal:")
+    print(pd.Series(y_train_clean).value_counts())
+
+    # Initialize resampling methods
+    print("\nApplying SMOTEENN for balanced training...")
+    try:
+        smoteenn = SMOTEENN(random_state=42, n_jobs=-1)
+        X_resampled, y_resampled = smoteenn.fit_resample(X_train_clean, y_train_clean)
+    except Exception as e:
+        print(f"SMOTEENN failed: {str(e)}. Using original data.")
+        X_resampled, y_resampled = X_train_clean, y_train_clean
+
+    # Optimized LightGBM parameters
+    lgb_model = lgb.LGBMClassifier(
+        objective='multiclass',
+        num_class=3,
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1
+    )
+
+    # Metric tracking
+    iteration_scores = []
+
+    print("\nStarting iterations...")
+    for i in range(n_iterations):
+        lgb_model.fit(X_resampled, y_resampled)
+        y_val_pred = lgb_model.predict(X_val_scaled)
+        val_f1 = f1_score(y_val, y_val_pred, average='weighted')
+        iteration_scores.append(val_f1)
+        print(f"Iteration {i + 1}/{n_iterations} - Validation F1 Score: {val_f1:.4f}")
+
+    # Plotting performance over iterations
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, n_iterations + 1), iteration_scores, marker='o', linestyle='-')
+    plt.title('Model Performance Over Iterations (Validation F1 Score)')
     plt.xlabel('Iteration')
-    plt.ylabel('F1 Score')
-    plt.grid(True)
+    plt.ylabel('Validation F1 Score')
+    plt.grid()
     plt.tight_layout()
-    plt.savefig(f'{folder}/f1_iterations_device_{device_id}.png')
+    plt.savefig(f'{plot_folder}/model_performance_iterations.png')
     plt.close()
     
-    print(f"Performance plot for device {device_id} saved to {folder}/f1_iterations_device_{device_id}.png")
+    print("\nModel performance tracking saved.")
+    
+    # Evaluate on test set after final iteration
+    y_test_pred = lgb_model.predict(X_test_scaled)
+    test_f1 = f1_score(y_test, y_test_pred, average='weighted')
+    print(f"\nTest F1 Score: {test_f1:.4f}")
+    print("\nTest Classification Report:")
+    print(classification_report(y_test, y_test_pred))
+
+    # Plot test results
+    plot_results(y_test, y_test_pred, "LightGBM - Test", plot_folder)
+
+    return lgb_model, scaler
+
+
+# def evaluate_model_iterations(model, X, y, iterations, scaler, feature_columns, folder, device_id):
+#     """
+#     Evaluate the model over multiple iterations and plot performance.
+#     """
+#     print(f"\nEvaluating model for {iterations} iterations on device {device_id}...")
+#     f1_scores = []
+    
+#     for i in range(iterations):
+#         # Split the data into train-test
+#         X_train, X_test, y_train, y_test = train_test_split(
+#             X, y, test_size=0.2, random_state=i, stratify=y
+#         )
+        
+#         # Scale the features
+#         X_train_scaled = scaler.fit_transform(X_train)
+#         X_test_scaled = scaler.transform(X_test)
+        
+#         # Train the model
+#         model.fit(X_train_scaled, y_train)
+        
+#         # Predict and calculate F1 score
+#         y_pred = model.predict(X_test_scaled)
+#         f1 = f1_score(y_test, y_pred, average='weighted')
+#         f1_scores.append(f1)
+    
+#     # Plot the F1 scores over iterations
+#     plt.figure(figsize=(10, 6))
+#     plt.plot(range(1, iterations + 1), f1_scores, marker='o')
+#     plt.title(f'F1 Score Over {iterations} Iterations - Device {device_id}')
+#     plt.xlabel('Iteration')
+#     plt.ylabel('F1 Score')
+#     plt.grid(True)
+#     plt.tight_layout()
+#     plt.savefig(f'{folder}/f1_iterations_device_{device_id}.png')
+#     plt.close()
+    
+#     print(f"Performance plot for device {device_id} saved to {folder}/f1_iterations_device_{device_id}.png")
 
   
 def analyze_device(device_id, model, scaler, feature_columns):
@@ -395,7 +479,8 @@ def main():
         print(f"Scaler saved to {scaler_filename}")
         
         # Analyze specific devices and evaluate iterations
-        device_ids = [118, 126, 226, 114]  # Add more device IDs as needed
+        #device_ids = [118, 126, 226, 114]  # Add more device IDs as needed
+        device_ids = [126]
         for device_id in device_ids:
             predicted_class = analyze_device(device_id, best_model, scaler, feature_columns)
             if predicted_class is not None:

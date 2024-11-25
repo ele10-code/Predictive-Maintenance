@@ -38,7 +38,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-echo "csv.zip" >> .gitignore
 echo "csv/" >> .gitignore
 echo "prepared_data.csv.zip" >> .gitignore
 echo "*.joblib" >> .gitignore

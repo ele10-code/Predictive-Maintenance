@@ -208,26 +208,6 @@ def plot_feature_importance(model, feature_columns, title_suffix, folder):
     plt.close()
     
     return feature_importance
-  
-
-    plt.tight_layout()
-    plt.savefig(f'{plot_folder}/model_performance_iterations.png')
-    plt.close()
-    
-    print("\nModel performance tracking saved.")
-    
-    # Evaluate on test set after final iteration
-    y_test_pred = lgb_model.predict(X_test_scaled)
-    test_f1 = f1_score(y_test, y_test_pred, average='weighted')
-    print(f"\nTest F1 Score: {test_f1:.4f}")
-    print("\nTest Classification Report:")
-    print(classification_report(y_test, y_test_pred))
-
-    # Plot test results
-    plot_results(y_test, y_test_pred, "LightGBM - Test", plot_folder)
-
-    return lgb_model, scaler
-
 
 def train_and_evaluate_model(X, y, feature_columns, n_iterations=100):
     """
@@ -311,46 +291,6 @@ def train_and_evaluate_model(X, y, feature_columns, n_iterations=100):
 
     return lgb_model, scaler
 
-
-# def evaluate_model_iterations(model, X, y, iterations, scaler, feature_columns, folder, device_id):
-#     """
-#     Evaluate the model over multiple iterations and plot performance.
-#     """
-#     print(f"\nEvaluating model for {iterations} iterations on device {device_id}...")
-#     f1_scores = []
-    
-#     for i in range(iterations):
-#         # Split the data into train-test
-#         X_train, X_test, y_train, y_test = train_test_split(
-#             X, y, test_size=0.2, random_state=i, stratify=y
-#         )
-        
-#         # Scale the features
-#         X_train_scaled = scaler.fit_transform(X_train)
-#         X_test_scaled = scaler.transform(X_test)
-        
-#         # Train the model
-#         model.fit(X_train_scaled, y_train)
-        
-#         # Predict and calculate F1 score
-#         y_pred = model.predict(X_test_scaled)
-#         f1 = f1_score(y_test, y_pred, average='weighted')
-#         f1_scores.append(f1)
-    
-#     # Plot the F1 scores over iterations
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(range(1, iterations + 1), f1_scores, marker='o')
-#     plt.title(f'F1 Score Over {iterations} Iterations - Device {device_id}')
-#     plt.xlabel('Iteration')
-#     plt.ylabel('F1 Score')
-#     plt.grid(True)
-#     plt.tight_layout()
-#     plt.savefig(f'{folder}/f1_iterations_device_{device_id}.png')
-#     plt.close()
-    
-#     print(f"Performance plot for device {device_id} saved to {folder}/f1_iterations_device_{device_id}.png")
-
-  
 def analyze_device(device_id, model, scaler, feature_columns):
     """
     Analyze a specific device using the trained model and return the most common predicted class.
@@ -415,49 +355,27 @@ def analyze_device(device_id, model, scaler, feature_columns):
         print(f"Error analyzing device {device_id}: {str(e)}")
         return None
 
-
-
 def analyze_multiple_devices(device_ids, model, scaler, feature_columns):
     """
     Analyze multiple devices and compare their results.
     """
-    all_results = {}
-    all_dfs = {}
+    device_results = {}
     
     for device_id in device_ids:
-        df, results = analyze_device(device_id, model, scaler, feature_columns)
-        if df is not None and results is not None:
-            all_results[device_id] = results
-            all_dfs[device_id] = df
+        result = analyze_device(device_id, model, scaler, feature_columns)
+        if result is not None:
+            device_results[device_id] = result
     
-    if not all_results:
+    if not device_results:
         print("No devices were successfully analyzed.")
         return None
     
-    # Compare devices
-    comparison_folder = 'device_comparisons'
-    os.makedirs(comparison_folder, exist_ok=True)
+    # Print summary of results
+    print("\nSummary of device classifications:")
+    for device_id, predicted_class in device_results.items():
+        print(f"Device {device_id}: Class {predicted_class}")
     
-    try:
-        # Compare prediction distributions
-        plt.figure(figsize=(12, 6))
-        for device_id, results in all_results.items():
-            dist = pd.Series(results['prediction_distribution'])
-            dist = dist / dist.sum()  # normalize
-            plt.bar(dist.index.astype(str) + f'_Device{device_id}', 
-                   dist.values, label=f'Device {device_id}')
-        plt.title('Prediction Distribution Comparison Across Devices')
-        plt.xlabel('Class')
-        plt.ylabel('Proportion')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f'{comparison_folder}/prediction_distribution_comparison.png')
-        plt.close()
-        
-    except Exception as e:
-        print(f"Error creating comparison plots: {str(e)}")
-    
-    return all_results
+    return device_results
 
 def main():
     try:
@@ -478,29 +396,18 @@ def main():
         print(f"Model saved to {model_filename}")
         print(f"Scaler saved to {scaler_filename}")
         
-        # Analyze specific devices and evaluate iterations
-        #device_ids = [118, 126, 226, 114]  # Add more device IDs as needed
-        device_ids = [126]
-        for device_id in device_ids:
-            predicted_class = analyze_device(device_id, best_model, scaler, feature_columns)
-            if predicted_class is not None:
-                print(f"The device {device_id} was classified in class: {predicted_class}")
-                
-                # Evaluate and plot performance over 100 iterations
-                evaluate_model_iterations(
-                    best_model, X, y, iterations=100, scaler=scaler, 
-                    feature_columns=feature_columns, folder=plot_folder, device_id=device_id
-                )
-            else:
-                print(f"Analysis for device {device_id} failed.")
+        # Analyze specific devices
+        device_ids = [126]  # Puoi aggiungere più device_ids come necessario
+        device_results = analyze_multiple_devices(device_ids, best_model, scaler, feature_columns)
         
-        print("\nAnalysis complete!")
+        if device_results:
+            print("\nAnalysis completed successfully!")
+        else:
+            print("\nAnalysis completed with some errors.")
         
     except Exception as e:
         print(f"Error in main execution: {str(e)}")
         return None
-
-
 
 if __name__ == "__main__":
     main()
